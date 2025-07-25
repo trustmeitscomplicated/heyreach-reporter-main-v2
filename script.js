@@ -1,9 +1,8 @@
 // ============================================================================
-// HeyReach Dashboard — script.js (VERSION 11 - DEPENDENT FILTERS FIX)
+// HeyReach Dashboard — script.js (VERSION 15 - REVERTED CAMPAIGN SEARCH)
 // ----------------------------------------------------------------------------
 // INTEGRATED FIXES:
-// - Fixed the campaign filter logic. It now updates based on the selected account.
-// - This prevents selecting impossible filter combinations and ensures correct behavior.
+// - Reverted the campaign filter from a searchable input to a standard dropdown.
 // - Maintained all previous functionality and visual improvements.
 // ============================================================================
 
@@ -246,7 +245,6 @@ function populateFilters() {
     const accSel = qs("#filter-account");
     const campSel = qs("#filter-campaign");
 
-    // Populate Account Filter
     accSel.innerHTML = '<option value="all">All Accounts</option>' +
       allAccounts
         .sort((a, b) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`))
@@ -258,12 +256,10 @@ function populateFilters() {
         refreshTable();
     });
 
-    // Initial population of campaign filter, then set up its listener
     updateCampaignFilter();
     campSel.disabled = false;
     campSel.addEventListener("change", refreshTable);
 
-    // Populate Status Filters
     const statusWrapper = qs("#status-filters .space-y-2");
     statusWrapper.innerHTML = "";
     [...new Set(allCampaigns.map(c => c.status))].sort().forEach(st => {
@@ -277,12 +273,28 @@ function populateFilters() {
             </label>`);
         qs(`#${id}`).addEventListener("change", refreshTable);
     });
+
+    const form = qs("#filter-form");
+    if (!qs("#hide-no-replies-container")) {
+        const hideContainer = document.createElement('div');
+        hideContainer.id = 'hide-no-replies-container';
+        hideContainer.className = 'mt-4 pt-4 border-t border-border dark:border-border';
+        hideContainer.innerHTML = `
+            <label class="flex items-center space-x-2 cursor-pointer">
+                <input type="checkbox" id="hide-no-replies" class="accent-primary h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary">
+                <span>Hide campaigns with no replies</span>
+            </label>
+        `;
+        form.appendChild(hideContainer);
+        qs("#hide-no-replies").addEventListener("change", refreshTable);
+    }
 }
 
 function applyFiltersSort(list) {
   const accId = qs("#filter-account").value;
   const campId = qs("#filter-campaign").value;
   const allowedStatuses = qsa("#status-filters input:checked").map(c => c.dataset.val);
+  const hideNoReplies = qs("#hide-no-replies")?.checked;
   
   let arr = [...list];
   
@@ -294,6 +306,10 @@ function applyFiltersSort(list) {
   }
   
   arr = arr.filter(c => allowedStatuses.includes(c.status));
+
+  if (hideNoReplies) {
+      arr = arr.filter(c => c.numReplies > 0);
+  }
 
   const sortBy = qs("#sort-by").value;
   arr.sort((a, b) => {
@@ -455,7 +471,6 @@ async function openModal(campaign) {
     
     qs("#modal-content-container").classList.remove('hidden');
     
-    // REVERTED: Filter for conversations that have a reply from the correspondent
     activeModalConversations = convos.filter(c => c.messages && c.messages.some(m => m.sender === 'CORRESPONDENT'));
 
     if (!activeModalConversations.length) {
