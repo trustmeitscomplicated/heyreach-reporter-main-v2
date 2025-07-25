@@ -1,36 +1,45 @@
 // ============================================================================
-// HeyReach Dashboard — script.js (FINALNA WERSJA Z POPRAWIONYM API)
+// HeyReach Dashboard — script.js (VERSION 9 - FINAL POLISH & FUNCTIONALITY)
 // ----------------------------------------------------------------------------
-// ZINTEGROWANE ZMIANY:
-// - Zaimplementowano poprawną logikę wyświetlania PEŁNEJ historii
-//   konwersacji na podstawie dostarczonej dokumentacji.
-// - Usunięto zbędne wywołania API, co znacznie optymalizuje działanie.
-// - Aplikacja jest teraz w pełni funkcjonalna.
+// INTEGRATED FIXES:
+// - All user-facing strings are now consistently in English.
+// - Added a new "Hide empty campaigns" filter for better control.
+// - Implemented color-coded status indicators in the table to match the chart.
+// - Refined the `paginate` function to be more robust and fetch all campaigns reliably.
+// - The Map-based account lookup remains to ensure account names are matched correctly.
 // ============================================================================
 
-/* global Chart, jsPDF */
+/* global Chart */
 
-// ---------- Konfiguracja ----------------------------------------------------
-const PROXY_URL = "https://corsproxy.io/?";
-const API_URL = "https://api.heyreach.io/api/public";
-const BASE_URL = PROXY_URL + API_URL;
-
-const ENDPOINTS = {
-  campaign: "/campaign/GetAll",
-  conversations: "/inbox/GetConversationsV2",
-  // Usunięto niepotrzebny endpoint
-};
+// ---------- Configuration ----------------------------------------------------
+const BASE_URL = "https://shy-meadow-dba0.lammelstanislaw.workers.dev/api/public";
 const PAGE_LIMIT = 100;
 
-// ---------- Stan -----------------------------------------------------------
+const ENDPOINTS = {
+  accounts: "/li_account/GetAll",
+  campaigns: "/campaign/GetAll",
+  conversations: "/inbox/GetConversationsV2",
+};
+
+// Consistent color mapping for statuses
+const STATUS_COLORS = {
+    'IN_PROGRESS': 'hsl(217, 91%, 60%)', // Blue
+    'FINISHED': 'hsl(145, 63%, 42%)',    // Green
+    'PAUSED': 'hsl(38, 92%, 50%)',      // Yellow/Orange
+    'DRAFT': 'hsl(215, 14%, 34%)',      // Grey
+    'FAILED': 'hsl(354, 70%, 54%)',     // Red
+    'default': 'hsl(215, 16%, 65%)'     // Default Grey
+};
+
+// ---------- State -----------------------------------------------------------
 let apiKeys = [];
-let campaigns = [];
+let allCampaigns = [];
+let allAccounts = [];
 let chartInstance = null;
 let sortAsc = true;
-// Zmienna do przechowywania konwersacji dla aktywnego modala
 let activeModalConversations = [];
 
-// ---------- Helpers DOM ----------------------------------------------------
+// ---------- DOM Helpers ----------------------------------------------------
 const qs = (s, p = document) => p.querySelector(s);
 const qsa = (s, p = document) => [...p.querySelectorAll(s)];
 
@@ -59,23 +68,65 @@ async function onFetchData() {
   try {
     resetUI();
     apiKeys = [qs("#api-key-1").value, qs("#api-key-2").value, qs("#api-key-3").value].map((v) => v.trim()).filter(Boolean);
-    if (!apiKeys.length) throw new Error("Podaj co najmniej jeden klucz API.");
+    if (!apiKeys.length) throw new Error("Please provide at least one API key.");
 
-    setStatus("Pobieram kampanie…", true);
-    const allLists = await Promise.all(apiKeys.map((key, idx) => fetchCampaigns(key, idx)));
-    campaigns = allLists.flat();
-    if (!campaigns.length) throw new Error("Brak kampanii lub błąd klucza API. Sprawdź poprawność kluczy i odśwież stronę.");
+    setStatus("Fetching LinkedIn accounts…", true);
+    allAccounts = await fetchAllAccounts(apiKeys);
+    const accountsMap = new Map(allAccounts.map(acc => [acc.id, acc]));
 
-    setStatus("Liczenie odpowiedzi…", true);
-    await Promise.all(campaigns.map((c) => fetchRepliesForCampaign(c)));
+    setStatus("Fetching campaigns…", true);
+    const campaignsPerKey = await Promise.all(
+        apiKeys.map(key => paginate(key, ENDPOINTS.campaigns, {}))
+    );
+
+    let processedCampaigns = [];
+    campaignsPerKey.forEach((campaignList, keyIndex) => {
+        if (!campaignList) return;
+        campaignList.forEach(c => {
+            const accountId = c.linkedInAccountId ?? c.accountId ?? (c.campaignAccountIds && c.campaignAccountIds.length > 0 ? c.campaignAccountIds[0] : null);
+            const account = accountsMap.get(accountId);
+            const accountName = account ? `${account.firstName} ${account.lastName}` : "(No account name)";
+            
+            if (!account && accountId) {
+                console.warn(`Could not find an account for campaign "${c.name}" (Searched for Account ID: ${accountId})`);
+            }
+            
+            processedCampaigns.push({
+                id: c.id,
+                name: c.name,
+                status: c.status,
+                progressStats: c.progressStats || {},
+                totalLeads: c.progressStats?.totalUsers || 0,
+                linkedInAccountId: accountId,
+                accountName: accountName,
+                sourceKeyIdx: keyIndex,
+                numContacted: 0,
+                numReplies: 0,
+                numUnread: 0,
+                replyRate: "0%",
+            });
+        });
+    });
+
+    allCampaigns = [...new Map(processedCampaigns.map(item => [item.id, item])).values()];
+
+    if (!allCampaigns.length) {
+        setStatus("No campaigns found for the provided API key(s).", false);
+        return;
+    }
+
+    setStatus("Fetching conversations and replies…", true);
+    const promises = allCampaigns.map(c => () => fetchConversationStats(c));
+    await runPromisesInPool(promises, 5);
 
     renderAll();
-    setStatus("Gotowe!", false);
+    setStatus("Done!", false);
   } catch (e) {
     console.error(e);
-    setStatus(e.message || "Wystąpił nieoczekiwany błąd.", false, true);
+    setStatus(e.message || "An unexpected error occurred.", false, true);
   }
 }
+
 
 // ---------- API core -------------------------------------------------------
 async function apiPost(apiKey, endpoint, body = {}, retries = 3, delay = 1000) {
@@ -87,18 +138,20 @@ async function apiPost(apiKey, endpoint, body = {}, retries = 3, delay = 1000) {
     });
 
     if (res.status === 429 && retries > 0) {
-      setStatus(`API przeciążone. Ponawiam za ${delay / 1000}s...`, true);
+      const currentStatus = qs("#status-message").textContent;
+      setStatus(`API rate limit hit. Retrying... (${currentStatus})`, true);
       await new Promise((r) => setTimeout(r, delay));
       return apiPost(apiKey, endpoint, body, retries - 1, delay * 2);
     }
 
     if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        const errorMsg = errData.error || errData.message || "Nieznany błąd serwera";
-        throw new Error(`Błąd zapytania do ${endpoint} (status: ${res.status}) — ${errorMsg}`);
+        const errData = await res.text().catch(() => `HTTP error! status: ${res.status}`);
+        throw new Error(`API request to ${endpoint} failed for key ...${apiKey.slice(-4)}: ${errData}`);
     }
+    
+    const responseText = await res.text();
+    return responseText ? JSON.parse(responseText) : { items: [], totalCount: 0 };
 
-    return res.json();
   } catch (e) {
     throw e;
   }
@@ -107,34 +160,34 @@ async function apiPost(apiKey, endpoint, body = {}, retries = 3, delay = 1000) {
 async function paginate(apiKey, endpoint, body) {
   let offset = 0;
   const out = [];
-  while (true) {
+  
+  while(true) {
     const resp = await apiPost(apiKey, endpoint, { ...body, limit: PAGE_LIMIT, offset });
     const items = resp.items || [];
+    if (items.length === 0) {
+        break; // Exit if no more items are returned
+    }
     out.push(...items);
-    if (items.length < PAGE_LIMIT) break;
-    offset += PAGE_LIMIT;
+    offset += items.length;
   }
+
   return out;
 }
 
-// ---------- Logika Aplikacji -----------------------------------------------
-async function fetchCampaigns(apiKey, keyIdx) {
-  const list = await paginate(apiKey, ENDPOINTS.campaign, {});
-  return list.map((c) => ({
-    id: c.id,
-    name: c.name,
-    status: c.status,
-    progressStats: c.progressStats || {},
-    totalLeads: (c.progressStats?.totalUsers) || 0,
-    linkedInAccountId: c.linkedInAccountId ?? c.accountId ?? null,
-    accountName: c.accountName ?? "(brak nazwy konta)",
-    sourceKeyIdx: keyIdx,
-    numReplies: 0,
-    replyRate: "0%",
-  }));
+// ---------- Application Logic -----------------------------------------------
+async function fetchAllAccounts(keys) {
+    const allResults = await Promise.all(
+        keys.map(key => paginate(key, ENDPOINTS.accounts, {}))
+    );
+    const combined = allResults.flat();
+    return [...new Map(combined.map(item => [item.id, item])).values()];
 }
 
-async function fetchRepliesForCampaign(c) {
+async function fetchConversationStats(c) {
+  if (c.sourceKeyIdx === -1 || c.sourceKeyIdx === undefined) {
+      console.warn(`Could not find source API key for campaign: ${c.name}`);
+      return;
+  }
   const apiKey = apiKeys[c.sourceKeyIdx];
   const filters = {
     campaignIds: [c.id],
@@ -143,21 +196,28 @@ async function fetchRepliesForCampaign(c) {
 
   const convos = await paginate(apiKey, ENDPOINTS.conversations, { filters });
   
-  // POPRAWKA: Zliczamy konwersacje, które mają jakąkolwiek wiadomość od "CORRESPONDENT"
+  c.numContacted = convos.length;
   c.numReplies = convos.filter(cv => cv.messages && cv.messages.some(m => m.sender === 'CORRESPONDENT')).length;
-  c.replyRate = c.totalLeads ? `${((c.numReplies / c.totalLeads) * 100).toFixed(1)}%` : "0%";
+  c.numUnread = convos.filter(cv => !cv.read).length;
+  c.replyRate = c.numContacted > 0 ? `${((c.numReplies / c.numContacted) * 100).toFixed(1)}%` : "0%";
 }
+
 
 // ---------- UI -------------------------------------------------------------
 function setStatus(msg, loading, error = false) {
   qs("#status-message").textContent = msg;
   qs("#loader").classList.toggle("hidden", !loading);
-  qs("#status-message").classList.toggle("text-red-600", error);
-  qs("#status-message").classList.toggle("text-green-600", !error && !loading && msg === 'Gotowe!');
+  qs("#status-message").classList.remove("text-red-600", "text-green-600");
+  if (error) {
+    qs("#status-message").classList.add("text-red-600");
+  } else if (!loading && msg === 'Done!') {
+    qs("#status-message").classList.add("text-green-600");
+  }
 }
 
 function resetUI() {
-  campaigns = [];
+  allCampaigns = [];
+  allAccounts = [];
   qs("#results-section").classList.add("hidden");
   qs("#summary-grid").innerHTML = "";
   qs("#campaigns-table tbody").innerHTML = "";
@@ -167,42 +227,68 @@ function resetUI() {
 function renderAll() {
   qs("#results-section").classList.remove("hidden");
   populateFilters();
-  drawSummaryCards();
-  drawStatusChart();
   refreshTable();
 }
 
 function populateFilters() {
     const accSel = qs("#filter-account");
     if (!accSel) return;
-    const uniqueAccounts = [...new Map(campaigns.map(c => [c.linkedInAccountId, c.accountName])).entries()];
     
-    accSel.innerHTML = '<option value="">Wszystkie konta</option>' +
-      uniqueAccounts
-        .sort(([, aName], [, bName]) => aName.localeCompare(bName))
-        .map(([id, name]) => `<option value="${id}">${name}</option>`).join("");
+    accSel.innerHTML = '<option value="all">All Accounts</option>' +
+      allAccounts
+        .sort((a, b) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`))
+        .map(acc => `<option value="${acc.id}">${acc.firstName} ${acc.lastName}</option>`).join("");
     
+    accSel.disabled = false;
     accSel.addEventListener("change", refreshTable);
 
-    const wrapper = qs("#status-filters .space-y-2");
-    wrapper.innerHTML = "";
-    [...new Set(campaigns.map(c => c.status))].sort().forEach(st => {
-        const id = `chk-${st}`;
-        wrapper.insertAdjacentHTML("beforeend", `<label class="flex items-center space-x-2 cursor-pointer"><input type="checkbox" id="${id}" data-val="${st}" checked class="accent-primary h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"><span>${st}</span></label>`);
+    const statusWrapper = qs("#status-filters .space-y-2");
+    statusWrapper.innerHTML = "";
+    [...new Set(allCampaigns.map(c => c.status))].sort().forEach(st => {
+        const id = `chk-status-${st}`;
+        const color = STATUS_COLORS[st] || STATUS_COLORS.default;
+        statusWrapper.insertAdjacentHTML("beforeend", `
+            <label class="flex items-center space-x-2 cursor-pointer">
+                <input type="checkbox" id="${id}" data-val="${st}" checked class="accent-primary h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary">
+                <span class="w-3 h-3 rounded-full" style="background-color: ${color};"></span>
+                <span>${st}</span>
+            </label>`);
         qs(`#${id}`).addEventListener("change", refreshTable);
     });
+
+    // Add "Hide empty" filter dynamically
+    const form = qs("#filter-form");
+    if (!qs("#hide-empty-filter-container")) {
+        const hideEmptyContainer = document.createElement('div');
+        hideEmptyContainer.id = 'hide-empty-filter-container';
+        hideEmptyContainer.innerHTML = `
+            <label class="flex items-center space-x-2 cursor-pointer mt-4 pt-4 border-t border-border dark:border-border-dark">
+                <input type="checkbox" id="hide-empty-campaigns" class="accent-primary h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary">
+                <span>Hide empty campaigns</span>
+            </label>
+        `;
+        form.appendChild(hideEmptyContainer);
+        qs("#hide-empty-campaigns").addEventListener("change", refreshTable);
+    }
 }
 
 
 function applyFiltersSort(list) {
   const accId = qs("#filter-account").value;
   const allowedStatuses = qsa("#status-filters input:checked").map(c => c.dataset.val);
+  const hideEmpty = qs("#hide-empty-campaigns")?.checked;
   
-  let arr = list;
-  if (accId) {
+  let arr = [...list];
+  
+  if (accId !== "all") {
     arr = arr.filter(c => String(c.linkedInAccountId) === accId);
   }
+  
   arr = arr.filter(c => allowedStatuses.includes(c.status));
+
+  if (hideEmpty) {
+    arr = arr.filter(c => c.numContacted > 0);
+  }
 
   const sortBy = qs("#sort-by").value;
   arr.sort((a, b) => {
@@ -217,105 +303,176 @@ function applyFiltersSort(list) {
   return arr;
 }
 
-function drawSummaryCards() {
+function drawSummaryView() {
     const grid = qs("#summary-grid");
     grid.innerHTML = "";
     
-    const stats = { total: 0, inProgress: 0, pending: 0, finished: 0, failed: 0, excluded: 0 };
-    campaigns.forEach(c => {
-        stats.total += c.progressStats.totalUsers || 0;
-        stats.inProgress += c.progressStats.totalUsersInProgress || 0;
-        stats.pending += c.progressStats.totalUsersPending || 0;
-        stats.finished += c.progressStats.totalUsersFinished || 0;
-        stats.failed += c.progressStats.totalUsersFailed || 0;
-        stats.excluded += c.progressStats.totalUsersExcluded || 0;
+    const filteredCampaigns = applyFiltersSort(allCampaigns);
+
+    const totalContacted = filteredCampaigns.reduce((s, c) => s + (c.numContacted || 0), 0);
+    const totalReplies = filteredCampaigns.reduce((s, c) => s + (c.numReplies || 0), 0);
+    const totalUnread = filteredCampaigns.reduce((s, c) => s + (c.numUnread || 0), 0);
+    const overallReplyRate = totalContacted > 0 ? `${((totalReplies / totalContacted) * 100).toFixed(1)}%` : "0.0%";
+
+    const progressSummary = { totalUsers: 0, totalUsersInProgress: 0, totalUsersPending: 0, totalUsersFinished: 0, totalUsersFailed: 0, totalUsersExcluded: 0 };
+    filteredCampaigns.forEach(c => {
+        if (c.progressStats) {
+            Object.keys(progressSummary).forEach(key => progressSummary[key] += c.progressStats[key] || 0);
+        }
     });
 
-    const totalReplies = campaigns.reduce((s, c) => s + c.numReplies, 0);
-    const rate = stats.total > 0 ? ((totalReplies / stats.total) * 100).toFixed(1) + "%" : "0%";
+    const reportItemHeaderStyle = "text-sm text-text-muted dark:text-text-muted mb-1 uppercase";
+    const reportItemValueStyle = "text-3xl font-bold text-base-text dark:text-base-text";
 
-    const cards = [
-        { t: "Total Leads", v: stats.total },
-        { t: "In Progress", v: stats.inProgress },
-        { t: "Pending", v: stats.pending },
-        { t: "Finished", v: stats.finished },
-        { t: "Failed", v: stats.failed },
-        { t: "Excluded", v: stats.excluded },
-        { t: "Odpowiedzi", v: `${totalReplies} (${rate})` },
-    ];
-    cards.forEach(o => {
-        grid.insertAdjacentHTML("beforeend", `<div class="p-6 rounded-xl bg-surface dark:bg-surface-dark shadow-subtle border border-border dark:border-border-dark text-center"><p class="text-sm text-text-muted dark:text-text-muted-dark mb-1">${o.t}</p><p class="text-3xl font-bold">${o.v}</p></div>`);
-    });
+    const summaryHtml = `
+        <h2 class="text-2xl font-bold mb-4 col-span-1 sm:col-span-2 lg:col-span-3">Summary for ${filteredCampaigns.length} Campaigns</h2>
+        
+        <div class="bg-surface dark:bg-surface p-6 rounded-xl shadow-subtle border border-border dark:border-border col-span-1 sm:col-span-2 lg:col-span-3">
+            <h3 class="text-xl font-semibold mb-4 text-base-text dark:text-base-text">Conversation Statistics</h3>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-5 text-center">
+                <div><p class="${reportItemHeaderStyle}">Started</p><p class="${reportItemValueStyle}">${totalContacted}</p></div>
+                <div><p class="${reportItemHeaderStyle}">Replied</p><p class="${reportItemValueStyle}">${totalReplies}</p></div>
+                <div><p class="${reportItemHeaderStyle}">Unread</p><p class="${reportItemValueStyle}">${totalUnread}</p></div>
+                <div><p class="${reportItemHeaderStyle}">Reply Rate</p><p class="${reportItemValueStyle}">${overallReplyRate}</p></div>
+            </div>
+        </div>
+
+        <div class="bg-surface dark:bg-surface p-6 rounded-xl shadow-subtle border border-border dark:border-border col-span-1 sm:col-span-2 lg:col-span-3">
+            <h3 class="text-xl font-semibold mb-4 text-base-text dark:text-base-text">Overall Campaign Progress</h3>
+            <div class="grid grid-cols-2 md:grid-cols-3 gap-5 text-center">
+                <div><p class="${reportItemHeaderStyle}">Total Leads</p><p class="${reportItemValueStyle}">${progressSummary.totalUsers}</p></div>
+                <div><p class="${reportItemHeaderStyle}">In Progress</p><p class="${reportItemValueStyle}">${progressSummary.totalUsersInProgress}</p></div>
+                <div><p class="${reportItemHeaderStyle}">Pending</p><p class="${reportItemValueStyle}">${progressSummary.totalUsersPending}</p></div>
+                <div><p class="${reportItemHeaderStyle}">Finished</p><p class="${reportItemValueStyle}">${progressSummary.totalUsersFinished}</p></div>
+                <div><p class="${reportItemHeaderStyle}">Failed</p><p class="${reportItemValueStyle}">${progressSummary.totalUsersFailed}</p></div>
+                <div><p class="${reportItemHeaderStyle}">Excluded</p><p class="${reportItemValueStyle}">${progressSummary.totalUsersExcluded}</p></div>
+            </div>
+        </div>
+    `;
+    grid.innerHTML = summaryHtml;
 }
 
 
 function drawStatusChart() {
   const ctx = qs("#status-chart").getContext("2d");
+  const filteredCampaigns = applyFiltersSort(allCampaigns);
+  
   const tally = {};
-  campaigns.forEach((c) => tally[c.status] = (tally[c.status] || 0) + 1);
-  const data = { labels: Object.keys(tally), datasets: [{ data: Object.values(tally) }] };
+  filteredCampaigns.forEach((c) => tally[c.status] = (tally[c.status] || 0) + 1);
+  
+  const labels = Object.keys(tally);
+  const dataValues = Object.values(tally);
+  const backgroundColors = labels.map(label => STATUS_COLORS[label] || STATUS_COLORS.default);
+  const isDark = document.documentElement.classList.contains('dark');
+
+  const data = { 
+      labels: labels, 
+      datasets: [{ 
+          data: dataValues,
+          backgroundColor: backgroundColors,
+          borderColor: isDark ? 'hsl(222, 24%, 18%)' : '#ffffff',
+          borderWidth: 2
+      }] 
+  };
+  
   if (chartInstance) chartInstance.destroy();
-  chartInstance = new Chart(ctx, { type: "doughnut", data, options: { plugins: { legend: { position: "bottom" } } } });
+  
+  chartInstance = new Chart(ctx, { 
+      type: "doughnut", 
+      data, 
+      options: { 
+          responsive: true, 
+          plugins: { 
+              legend: { 
+                  position: "bottom",
+                  labels: {
+                      usePointStyle: true,
+                      pointStyle: 'rectRounded',
+                      color: isDark ? 'hsl(210, 30%, 95%)' : 'hsl(220, 15%, 25%)'
+                  }
+              } 
+          } 
+      } 
+  });
 }
 
 function refreshTable() {
   const tbody = qs("#campaigns-table tbody");
   tbody.innerHTML = "";
-  applyFiltersSort([...campaigns]).forEach((c) => {
+  const filteredData = applyFiltersSort(allCampaigns);
+
+  filteredData.forEach((c) => {
     const tr = document.createElement("tr");
-    tr.className = "hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer transition-colors duration-150";
-    tr.innerHTML = `<td class="p-4 font-medium">${c.name}</td><td class="p-4">${c.accountName}</td><td class="p-4">${c.status}</td><td class="p-4 text-center">${c.totalLeads}</td><td class="p-4 text-center">${c.numReplies}</td><td class="p-4 text-center font-semibold">${c.replyRate}</td>`;
+    const color = STATUS_COLORS[c.status] || STATUS_COLORS.default;
+    tr.className = "hover:bg-gray-50 dark:hover:bg-surface/50 cursor-pointer transition-colors duration-150";
+    tr.innerHTML = `
+        <td class="p-4 font-medium">${escapeHTML(c.name)}</td>
+        <td class="p-4">${escapeHTML(c.accountName)}</td>
+        <td class="p-4">
+            <div class="flex items-center">
+                <span class="w-3 h-3 rounded-full mr-2" style="background-color: ${color};"></span>
+                <span>${escapeHTML(c.status)}</span>
+            </div>
+        </td>
+        <td class="p-4 text-center">${c.totalLeads}</td>
+        <td class="p-4 text-center">${c.numContacted}</td>
+        <td class="p-4 text-center">${c.numReplies}</td>
+        <td class="p-4 text-center font-semibold">${c.replyRate}</td>`;
     tr.addEventListener("click", () => openModal(c));
     tbody.appendChild(tr);
   });
+  
+  drawSummaryView();
+  drawStatusChart();
 }
 
-async function openModal(c) {
+async function openModal(campaign) {
   const dlg = qs("#leads-modal");
   dlg.showModal();
-  qs("#modal-title").textContent = `Konwersacje: ${c.name}`;
+  qs("#modal-title").textContent = `Conversations: ${campaign.name} (${campaign.accountName})`;
   qs("#modal-loader").classList.remove("hidden");
   qs("#modal-content-container").classList.add('hidden');
-  qs("#conversations-list").innerHTML = qs("#messages-thread").innerHTML = "";
+  qs("#conversations-list").innerHTML = "";
+  qs("#messages-thread").innerHTML = "";
 
   try {
-    const apiKey = apiKeys[c.sourceKeyIdx];
+    const apiKey = apiKeys[campaign.sourceKeyIdx];
     const convos = await paginate(apiKey, ENDPOINTS.conversations, {
       filters: {
-        campaignIds: [c.id],
-        linkedInAccountIds: c.linkedInAccountId ? [c.linkedInAccountId] : [],
+        campaignIds: [campaign.id],
+        linkedInAccountIds: campaign.linkedInAccountId ? [campaign.linkedInAccountId] : [],
       },
     });
     
     qs("#modal-content-container").classList.remove('hidden');
-
-    // POPRAWKA: Filtrujemy po wiadomościach od "CORRESPONDENT"
-    activeModalConversations = convos.filter(c => c.messages && c.messages.some(m => m.sender === 'CORRESPONDENT'));
+    
+    activeModalConversations = convos;
 
     if (!activeModalConversations.length) {
-      qs("#conversations-list").innerHTML = '<p class="p-4 text-sm text-text-muted dark:text-text-muted-dark">Brak konwersacji z odpowiedziami w tej kampanii.</p>';
+      qs("#conversations-list").innerHTML = '<p class="p-4 text-sm text-text-muted dark:text-text-muted">No conversations have been started in this campaign.</p>';
       qs("#messages-thread").innerHTML = '';
       return;
     }
     
-    qs("#conversations-list").innerHTML = ''; // Wyczyść listę przed dodaniem nowych
-    activeModalConversations.forEach((v, i) => {
+    qs("#conversations-list").innerHTML = '';
+    activeModalConversations.forEach((convo) => {
       const div = document.createElement("div");
-      div.className = "p-4 border-b border-border dark:border-border-dark hover:bg-gray-100 dark:hover:bg-gray-800/50 cursor-pointer transition-colors duration-150";
-      div.dataset.convoId = v.id;
-      div.innerHTML = `<p class="font-medium truncate">${v.correspondentProfile.firstName} ${v.correspondentProfile.lastName}</p><p class="text-xs text-text-muted dark:text-text-muted-dark truncate">${v.lastMessageText ?? 'Brak ostatniej wiadomości'}</p>`;
+      div.className = "p-4 border-b border-border dark:border-border hover:bg-gray-100 dark:hover:bg-surface/50 cursor-pointer transition-colors duration-150";
+      div.dataset.convoId = convo.id;
+      div.innerHTML = `
+        <p class="font-medium truncate">${escapeHTML(convo.correspondentProfile.firstName)} ${escapeHTML(convo.correspondentProfile.lastName)}</p>
+        <p class="text-xs text-text-muted dark:text-text-muted truncate">${escapeHTML(convo.lastMessageText) ?? 'No messages yet'}</p>`;
       div.addEventListener("click", (e) => {
-          qsa('#conversations-list > div').forEach(el => el.classList.remove('bg-gray-100', 'dark:bg-gray-800/50'));
-          e.currentTarget.classList.add('bg-gray-100', 'dark:bg-gray-800/50');
-          displayMessages(v.id);
+          qsa('#conversations-list > div').forEach(el => el.classList.remove('bg-gray-100', 'dark:bg-surface/50'));
+          e.currentTarget.classList.add('bg-gray-100', 'dark:bg-surface/50');
+          displayMessages(convo.id);
       });
       qs("#conversations-list").appendChild(div);
     });
     
-    // Automatycznie załaduj pierwszą konwersację z listy
     if (activeModalConversations.length > 0) {
         const firstConvo = activeModalConversations[0];
-        qs('#conversations-list > div:first-child').classList.add('bg-gray-100', 'dark:bg-gray-800/50');
+        qs('#conversations-list > div:first-child').classList.add('bg-gray-100', 'dark:bg-surface/50');
         displayMessages(firstConvo.id);
     }
 
@@ -332,7 +489,7 @@ function displayMessages(convoId) {
   
   const convo = activeModalConversations.find(c => c.id === convoId);
   if (!convo || !convo.messages) {
-    thread.innerHTML = `<p class="p-4 text-text-muted dark:text-text-muted-dark">Nie znaleziono wiadomości dla tej konwersacji.</p>`;
+    thread.innerHTML = `<p class="p-4 text-text-muted dark:text-text-muted">No messages found for this conversation.</p>`;
     return;
   }
 
@@ -341,8 +498,8 @@ function displayMessages(convoId) {
     const div = document.createElement("div");
     div.className = `flex flex-col ${incoming ? 'items-start' : 'items-end'}`;
     div.innerHTML = `<div class="message-bubble ${incoming ? "message-received" : "message-sent"}">
-      <p class="whitespace-pre-wrap">${escapeHTML(m.body || "(bez treści)")}</p>
-      <span class="block mt-1 text-xs opacity-70 text-right">${new Date(m.createdAt).toLocaleString('pl-PL')}</span>
+      <p class="whitespace-pre-wrap">${escapeHTML(m.body || "(no content)")}</p>
+      <span class="block mt-1 text-xs opacity-70 text-right">${new Date(m.createdAt).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' })}</span>
     </div>`;
     thread.appendChild(div);
   });
@@ -351,13 +508,36 @@ function displayMessages(convoId) {
 
 
 function escapeHTML(str) {
-  if (typeof str !== 'string') return '';
-  return str.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  if (typeof str !== 'string' || !str) return '';
+  return str.replace(/[&<>"']/g, (c) => ({ 
+      "&": "&amp;", 
+      "<": "&lt;", 
+      ">": "&gt;", 
+      '"': "&quot;",
+      "'": "&#39;"
+  }[c]));
 }
 
-// ---------- Inicjalizacja --------------------------------------------------
+async function runPromisesInPool(promiseFns, poolLimit) {
+    const results = [];
+    const executing = [];
+    for (const promiseFn of promiseFns) {
+        const p = Promise.resolve().then(() => promiseFn());
+        results.push(p);
+        if (poolLimit <= promiseFns.length) {
+            const e = p.then(() => executing.splice(executing.indexOf(e), 1));
+            executing.push(e);
+            if (executing.length >= poolLimit) {
+                await Promise.race(executing);
+            }
+        }
+    }
+    return Promise.all(results);
+}
+
+
+// ---------- Initialization --------------------------------------------------
 document.addEventListener("DOMContentLoaded", () => {
-  // Inicjalizacja motywu i przycisków
   if (qs("#theme-toggle")) themeInit();
   if (qs("#fetch-data-btn")) qs("#fetch-data-btn").addEventListener("click", onFetchData);
   if (qs("#sort-by")) qs("#sort-by").addEventListener("change", refreshTable);
@@ -368,10 +548,8 @@ document.addEventListener("DOMContentLoaded", () => {
   });
   if (qs("#modal-close-btn")) qs("#modal-close-btn").addEventListener("click", () => qs("#leads-modal").close());
   
-  // Przeniesienie logiki z `index.html` dla czystości
   const savedKey = localStorage.getItem('heyreach_api_key');
   if (savedKey) {
-      qs('#api-key-1').value = savedKey; // Zakładamy, że klucz jest w pierwszym polu
-      onFetchData();
+      qs('#api-key-1').value = savedKey;
   }
 });

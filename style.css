@@ -2,7 +2,7 @@
   =====================================================================
   ULEPSZONY ARKUSZ STYLÓW DLA HEYREACH DASHBOARD
   ---------------------------------------------------------------------
-  Wersja 3.0 - Czysty, profesjonalny i wysokokontrastowy wygląd
+  Wersja 4.0 - Poprawiony tryb ciemny, lepszy kontrast i spójność
   =====================================================================
 */
 
@@ -12,25 +12,28 @@
     --color-primary-dark: hsl(217, 91%, 55%);
     
     /* -- Tryb Jasny -- */
-    --color-bg-light: hsl(216, 33%, 97%);
+    --color-bg-light: hsl(220, 20%, 97%);
     --color-surface-light: hsl(0, 0%, 100%);
-    --color-text-base-light: hsl(222, 22%, 20%);
-    --color-text-muted-light: hsl(215, 14%, 34%);
-    --color-border-light: hsl(215, 25%, 90%);
+    --color-text-base-light: hsl(220, 15%, 25%);
+    --color-text-muted-light: hsl(220, 10%, 45%);
+    --color-border-light: hsl(220, 15%, 90%);
 
-    /* -- Tryb Ciemny -- */
-    --color-bg-dark: hsl(222, 47%, 11%);
-    --color-surface-dark: hsl(222, 40%, 15%);
-    --color-text-base-dark: hsl(210, 40%, 98%);
-    --color-text-muted-dark: hsl(215, 16%, 65%);
-    --color-border-dark: hsl(215, 28%, 22%);
+    /* -- Tryb Ciemny (Ulepszony) -- */
+    --color-bg-dark: hsl(222, 25%, 12%);
+    --color-surface-dark: hsl(222, 24%, 18%);
+    --color-text-base-dark: hsl(210, 30%, 95%);
+    --color-text-muted-dark: hsl(215, 15%, 65%);
+    --color-border-dark: hsl(222, 20%, 28%);
 }
 
 /* --- Style Globalne --- */
+*, *::before, *::after {
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
 body {
     background-color: var(--color-bg-light);
     color: var(--color-text-base-light);
-    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .dark body {
@@ -40,35 +43,60 @@ body {
 
 /* --- Mapowanie Zmiennych na Klasy Używane w HTML --- */
 .bg-background { background-color: var(--color-bg-light); }
-.dark .bg-background-dark { background-color: var(--color-bg-dark); }
+.dark .bg-background { background-color: var(--color-bg-dark); }
 
 .bg-surface { background-color: var(--color-surface-light); }
-.dark .bg-surface-dark { background-color: var(--color-surface-dark); }
+.dark .bg-surface { background-color: var(--color-surface-dark); }
 
 .text-base-text { color: var(--color-text-base-light); }
-.dark .text-text-base-dark { color: var(--color-text-base-dark); }
+.dark .text-base-text { color: var(--color-text-base-dark); }
 
 .text-text-muted { color: var(--color-text-muted-light); }
-.dark .text-text-muted-dark { color: var(--color-text-muted-dark); }
+.dark .text-text-muted { color: var(--color-text-muted-dark); }
 
 .border-border { border-color: var(--color-border-light); }
-.dark .border-border-dark { border-color: var(--color-border-dark); }
+.dark .border-border { border-color: var(--color-border-dark); }
 
 .divide-border > :not([hidden]) ~ :not([hidden]) { border-color: var(--color-border-light); }
-.dark .divide-border-dark > :not([hidden]) ~ :not([hidden]) { border-color: var(--color-border-dark); }
+.dark .divide-border > :not([hidden]) ~ :not([hidden]) { border-color: var(--color-border-dark); }
+
+/* --- Poprawki dla trybu ciemnego --- */
+.dark input, .dark select, .dark textarea {
+    background-color: var(--color-bg-dark);
+    border-color: var(--color-border-dark);
+    color: var(--color-text-base-dark);
+}
+.dark input::placeholder, .dark textarea::placeholder {
+    color: var(--color-text-muted-dark);
+}
+.dark table thead {
+    background-color: hsla(222, 25%, 22%, 0.5);
+}
+.dark .hover\:bg-gray-700\/50:hover {
+    background-color: hsla(222, 20%, 30%, 0.5);
+}
 
 /* --- Akcenty i Interakcje --- */
 .bg-primary { background-color: var(--color-primary); }
 .hover\:bg-primary-dark:hover { background-color: var(--color-primary-dark); }
+.text-primary { color: var(--color-primary); }
+.accent-primary { accent-color: var(--color-primary); }
 .border-t-primary { border-top-color: var(--color-primary); }
-.focus\:ring-primary:focus { --tw-ring-color: var(--color-primary); }
+.focus\:ring-primary:focus { 
+  --tw-ring-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-bg-light), 0 0 0 4px var(--color-primary);
+}
+.dark .focus\:ring-primary:focus {
+  box-shadow: 0 0 0 2px var(--color-bg-dark), 0 0 0 4px var(--color-primary);
+}
+
 
 /* --- Cienie --- */
 .shadow-subtle {
     box-shadow: 0 1px 2px 0 rgba(27, 31, 35, 0.06), 0 1px 3px 0 rgba(27, 31, 35, 0.04);
 }
 .dark .shadow-subtle {
-    box-shadow: 0 0 0 1px var(--color-border-dark), 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+    box-shadow: 0 0 0 1px var(--color-border-dark), 0 4px 12px 0 rgba(0,0,0,0.1);
 }
 
 /* --- Pozostałe Ulepszenia --- */
@@ -82,7 +110,7 @@ body {
 }
 
 dialog::backdrop {
-    background: hsla(222, 47%, 11%, 0.5);
+    background: hsla(222, 25%, 8%, 0.5);
     backdrop-filter: blur(4px);
 }
 
@@ -99,10 +127,9 @@ dialog::backdrop {
     align-self: flex-end;
 }
 .message-received {
-    background-color: hsl(215, 25%, 92%);
+    background-color: hsl(220, 15%, 92%);
     border-bottom-left-radius: 0.25rem;
 }
 .dark .message-received {
-    background-color: hsl(215, 28%, 25%);
+    background-color: hsl(222, 20%, 25%);
 }
-
